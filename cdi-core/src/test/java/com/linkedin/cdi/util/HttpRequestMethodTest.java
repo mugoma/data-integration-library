@@ -208,6 +208,111 @@ public class HttpRequestMethodTest extends PowerMockTestCase {
     Assert.assertEquals(HttpRequestMethod.POST.getHttpRequest(String.format(BASE_URI, VERSION_2), parameters, headers).toString(), expected);
   }
 
+  /**
+   * Test POST_BATCH renders a multipart/mixed body with one application/http sub-request per
+   * element of the payload "data" array.
+   */
+  @Test
+  public void testPostBatchMultipartRequest() throws IOException {
+    String uri = "https://api.example.com/batch";
+    JsonObject payloads = gson.fromJson(
+        "{\"batchRelativeUrl\":\"/v1/entries\",\"data\":["
+            + "{\"id\":\"a\",\"action\":\"UPDATE\"},"
+            + "{\"id\":\"b\",\"action\":\"UPDATE\"}]}",
+        JsonObject.class);
+
+    HttpPost request = (HttpPost) HttpRequestMethod.POST_BATCH.getHttpRequest(
+        uri, new JsonObject(), new HashMap<>(), payloads);
+
+    Assert.assertEquals(request.getMethod(), "POST");
+    Assert.assertEquals(request.getURI().toString(), uri);
+
+    String contentType = request.getEntity().getContentType().getValue();
+    Assert.assertTrue(contentType.startsWith("multipart/mixed; boundary=cdi_batch_"), contentType);
+    String boundary = contentType.substring(contentType.indexOf("boundary=") + "boundary=".length());
+
+    String body = IOUtils.toString(request.getEntity().getContent(), StandardCharsets.UTF_8);
+    Assert.assertEquals(countOccurrences(body, "Content-Type: application/http"), 2);
+    Assert.assertEquals(countOccurrences(body, "POST /v1/entries"), 2);
+    Assert.assertTrue(body.contains("{\"id\":\"a\",\"action\":\"UPDATE\"}"));
+    Assert.assertTrue(body.contains("{\"id\":\"b\",\"action\":\"UPDATE\"}"));
+    // one opening delimiter per part plus a closing delimiter
+    Assert.assertEquals(countOccurrences(body, "--" + boundary + "\r\n"), 2);
+    Assert.assertTrue(body.contains("--" + boundary + "--"));
+    // multipart requires CRLF line endings
+    Assert.assertTrue(body.contains("\r\n"));
+  }
+
+  /**
+   * Test POST_BATCH defaults (sub-request method POST, content type application/json) and that
+   * each part gets a unique Content-ID.
+   */
+  @Test
+  public void testPostBatchDefaultsAndContentIds() throws IOException {
+    String uri = "https://api.example.com/batch";
+    JsonObject payloads = gson.fromJson(
+        "{\"batchRelativeUrl\":\"/v1/entries\",\"data\":["
+            + "{\"id\":\"a\"},{\"id\":\"b\"}]}",
+        JsonObject.class);
+
+    HttpPost request = (HttpPost) HttpRequestMethod.POST_BATCH.getHttpRequest(
+        uri, new JsonObject(), new HashMap<>(), payloads);
+    String body = IOUtils.toString(request.getEntity().getContent(), StandardCharsets.UTF_8);
+
+    Assert.assertTrue(body.contains("Content-ID: <cdi-batch-1>"), body);
+    Assert.assertTrue(body.contains("Content-ID: <cdi-batch-2>"), body);
+    Assert.assertEquals(countOccurrences(body, "Content-Type: application/json"), 2);
+  }
+
+  /**
+   * Test POST_BATCH honors an overridden sub-request method and content type.
+   */
+  @Test
+  public void testPostBatchOverrides() throws IOException {
+    JsonObject payloads = gson.fromJson(
+        "{\"batchRelativeUrl\":\"/v1/entries\",\"batchMethod\":\"GET\","
+            + "\"batchContentType\":\"application/ld+json\",\"data\":[{\"id\":\"a\"}]}",
+        JsonObject.class);
+
+    HttpPost request = (HttpPost) HttpRequestMethod.POST_BATCH.getHttpRequest(
+        "https://api.example.com/batch", new JsonObject(), new HashMap<>(), payloads);
+    String body = IOUtils.toString(request.getEntity().getContent(), StandardCharsets.UTF_8);
+
+    Assert.assertTrue(body.contains("GET /v1/entries"), body);
+    Assert.assertTrue(body.contains("Content-Type: application/ld+json"), body);
+  }
+
+  /**
+   * Test POST_BATCH fails fast when the required batchRelativeUrl is missing.
+   */
+  @Test(expectedExceptions = IllegalArgumentException.class)
+  public void testPostBatchMissingRelativeUrl() throws IOException {
+    JsonObject payloads = gson.fromJson("{\"data\":[{\"id\":\"a\"}]}", JsonObject.class);
+    HttpRequestMethod.POST_BATCH.getHttpRequest(
+        "https://api.example.com/batch", new JsonObject(), new HashMap<>(), payloads);
+  }
+
+  /**
+   * Test POST_BATCH fails fast when the data array is empty or missing.
+   */
+  @Test(expectedExceptions = IllegalArgumentException.class)
+  public void testPostBatchEmptyData() throws IOException {
+    JsonObject payloads = gson.fromJson(
+        "{\"batchRelativeUrl\":\"/v1/entries\",\"data\":[]}", JsonObject.class);
+    HttpRequestMethod.POST_BATCH.getHttpRequest(
+        "https://api.example.com/batch", new JsonObject(), new HashMap<>(), payloads);
+  }
+
+  private static int countOccurrences(String haystack, String needle) {
+    int count = 0;
+    int idx = 0;
+    while ((idx = haystack.indexOf(needle, idx)) != -1) {
+      count++;
+      idx += needle.length();
+    }
+    return count;
+  }
+
   private void addContentType() {
     headers.clear();
     headers.put(CONTENT_TYPE, CONTENT_TYPE_VALUE);
